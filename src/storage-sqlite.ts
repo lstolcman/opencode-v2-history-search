@@ -21,6 +21,39 @@ function openDb(): Database {
   return new Database(getDbPath(), { readonly: true });
 }
 
+export function findProjectID(
+  db: Database,
+  cwd = process.cwd(),
+): string | undefined {
+  const normalized = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  const rows = db
+    .query("SELECT id, worktree FROM project")
+    .all() as Array<{ id: string; worktree: string }>;
+
+  let best: { id: string; length: number } | undefined;
+  for (const row of rows) {
+    const worktree = row.worktree.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (normalized === worktree || normalized.startsWith(`${worktree}/`)) {
+      if (!best || worktree.length > best.length) {
+        best = { id: row.id, length: worktree.length };
+      }
+    }
+  }
+
+  return best?.id;
+}
+
+export function getCurrentProjectIDV2(cwd = process.cwd()): string | undefined {
+  const db = openDb();
+  try {
+    return findProjectID(db, cwd);
+  } catch {
+    return undefined;
+  } finally {
+    db.close();
+  }
+}
+
 export function isV2Schema(db?: Database): boolean {
   const shouldClose = db === undefined;
   const _db = db ?? openDb();

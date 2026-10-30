@@ -6,7 +6,7 @@ import {
   listMessagesSqliteV2,
   listPartsSqliteV2,
 } from "./storage-sqlite-v2";
-import { isV2Schema } from "./storage-sqlite";
+import { findProjectID, isV2Schema } from "./storage-sqlite";
 import { traceFileSqliteV2 } from "./search/file-trace-v2";
 import { searchMultitermV2, type MultitermV2Source } from "./search/multiterm-v2";
 
@@ -103,6 +103,12 @@ describe("OpenCode V2 SQLite storage", () => {
 
   test("detects the V2 schema", () => {
     expect(isV2Schema(db)).toBe(true);
+  });
+
+  test("finds the current project by worktree prefix", () => {
+    expect(findProjectID(db, "C:\\mock\\subdir")).toBe("proj1");
+    expect(findProjectID(db, "C:/other")).toBe("proj2");
+    expect(findProjectID(db, "C:/unknown")).toBeUndefined();
   });
 
   test("lists sessions globally and scoped by project", async () => {

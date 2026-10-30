@@ -2,6 +2,11 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import { Glob } from "bun";
+import {
+  dbExists,
+  getCurrentProjectIDV2,
+  isV2Schema,
+} from "./storage-sqlite";
 
 export interface Session {
   id: string;
@@ -41,6 +46,11 @@ export async function getStorageDir(): Promise<string> {
 }
 
 export async function getCurrentProjectID(): Promise<string> {
+  if (dbExists() && isV2Schema()) {
+    const id = getCurrentProjectIDV2();
+    if (id) return id;
+  }
+
   const proc = Bun.spawn(["git", "rev-list", "--max-parents=0", "--all"], {
     stdout: "pipe",
     stderr: "pipe",

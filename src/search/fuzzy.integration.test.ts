@@ -1,11 +1,10 @@
 import { test, expect, describe } from "bun:test";
 import { searchFuzzy } from "./fuzzy";
-
-const MAIN_PROJECT_ID = "4b0ea68d7af9a6031a7ffda7ad66e0cb83315750";
+import { getCurrentProjectID } from "../storage-provider";
 
 describe("fuzzy search (integration - requires real data)", () => {
   test("finds matches with typos", async () => {
-    const projectID = MAIN_PROJECT_ID;
+    const projectID = await getCurrentProjectID();
     const results = await searchFuzzy(projectID, "storag", {
       threshold: 0.3,
       limit: 5,
@@ -15,7 +14,7 @@ describe("fuzzy search (integration - requires real data)", () => {
   });
 
   test("finds matches with variations", async () => {
-    const projectID = MAIN_PROJECT_ID;
+    const projectID = await getCurrentProjectID();
     const results = await searchFuzzy(projectID, "storag search", {
       threshold: 0.5,
       limit: 5,
@@ -28,7 +27,7 @@ describe("fuzzy search (integration - requires real data)", () => {
   });
 
   test("respects limit parameter", async () => {
-    const projectID = MAIN_PROJECT_ID;
+    const projectID = await getCurrentProjectID();
     const results = await searchFuzzy(projectID, "storage", {
       threshold: 0.4,
       limit: 10,
@@ -38,7 +37,7 @@ describe("fuzzy search (integration - requires real data)", () => {
   });
 
   test("respects threshold parameter", async () => {
-    const projectID = MAIN_PROJECT_ID;
+    const projectID = await getCurrentProjectID();
 
     const strict = await searchFuzzy(projectID, "xyz123", {
       threshold: 0.1,
@@ -53,7 +52,7 @@ describe("fuzzy search (integration - requires real data)", () => {
   });
 
   test("returns results sorted by timestamp", async () => {
-    const projectID = MAIN_PROJECT_ID;
+    const projectID = await getCurrentProjectID();
     const results = await searchFuzzy(projectID, "storage", {
       threshold: 0.4,
       limit: 20,

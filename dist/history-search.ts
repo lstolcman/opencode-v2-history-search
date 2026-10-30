@@ -24,6 +24,8 @@ __export(exports_storage_sqlite, {
   listMessagesSqlite: () => listMessagesSqlite,
   isV2Schema: () => isV2Schema,
   getDbPath: () => getDbPath,
+  getCurrentProjectIDV2: () => getCurrentProjectIDV2,
+  findProjectID: () => findProjectID,
   dbExists: () => dbExists
 });
 import { Database } from "bun:sqlite";
@@ -42,6 +44,30 @@ function dbExists() {
 }
 function openDb() {
   return new Database(getDbPath(), { readonly: true });
+}
+function findProjectID(db, cwd = process.cwd()) {
+  const normalized = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  const rows = db.query("SELECT id, worktree FROM project").all();
+  let best;
+  for (const row of rows) {
+    const worktree = row.worktree.replace(/\\/g, "/").replace(/\/+$/, "");
+    if (normalized === worktree || normalized.startsWith(`${worktree}/`)) {
+      if (!best || worktree.length > best.length) {
+        best = { id: row.id, length: worktree.length };
+      }
+    }
+  }
+  return best?.id;
+}
+function getCurrentProjectIDV2(cwd = process.cwd()) {
+  const db = openDb();
+  try {
+    return findProjectID(db, cwd);
+  } catch {
+    return;
+  } finally {
+    db.close();
+  }
 }
 function isV2Schema(db) {
   const shouldClose = db === undefined;
@@ -322,6 +348,11 @@ async function getStorageDir() {
   return path2.join(xdgData, "opencode", "storage");
 }
 async function getCurrentProjectID() {
+  if (dbExists() && isV2Schema()) {
+    const id = getCurrentProjectIDV2();
+    if (id)
+      return id;
+  }
   const proc = Bun.spawn(["git", "rev-list", "--max-parents=0", "--all"], {
     stdout: "pipe",
     stderr: "pipe"
@@ -414,7 +445,9 @@ async function* listParts(messageID) {
     return;
   }
 }
-var init_storage = () => {};
+var init_storage = __esm(() => {
+  init_storage_sqlite();
+});
 
 // src/storage-provider.ts
 function storageKind() {
