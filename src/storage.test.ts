@@ -8,11 +8,12 @@ import {
   MOCK_PROJECT_DIR_2,
 } from "../test/fixtures/mock-data";
 import fs from "fs";
+import os from "os";
 import path from "path";
 
 test("getStorageDir returns valid path", async () => {
   const dir = await getStorageDir();
-  expect(dir).toContain("opencode/storage");
+  expect(dir).toContain(path.join("opencode", "storage"));
 });
 
 test("getCurrentProjectID returns non-empty string", async () => {
@@ -27,7 +28,7 @@ describe("listSessions", () => {
     let tmpDir: string;
 
     beforeEach(() => {
-      tmpDir = fs.mkdtempSync("/tmp/test-global-sessions-");
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "test-global-sessions-"));
       savedXdgData = process.env.XDG_DATA_HOME;
     });
 

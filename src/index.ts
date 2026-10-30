@@ -157,13 +157,27 @@ Supports keyword search, regex patterns, fuzzy search, multi-term AND search, da
 // The structural types below mirror `@opencode/plugin` (promise variant) so
 // the package does not need a runtime dependency on it.
 
+interface HistorySearchArgs {
+  query?: string;
+  terms?: string[];
+  filePath?: string;
+  searchAllProjects?: boolean;
+  mode?: "keyword" | "fuzzy";
+  regex?: boolean;
+  caseSensitive?: boolean;
+  fuzzyThreshold?: number;
+  date?: string;
+  limit?: number;
+  role?: "user" | "assistant";
+}
+
 interface V2ToolEditor {
   add(tool: {
     name: string;
     description: string;
     input: unknown;
     execute: (
-      input: any,
+      input: HistorySearchArgs,
       context: { signal: AbortSignal },
     ) => Promise<{ content?: string; metadata?: Record<string, unknown> }>;
   }): void;
@@ -187,7 +201,7 @@ interface V2PluginContext {
       // as a tool input schema — no JSON-Schema conversion needed.
       input: tool.schema.object(historySearch.args),
       execute: async (input, context) => {
-        const result = await historySearch.execute(input, {
+        const result = (await historySearch.execute(input, {
           sessionID: "",
           messageID: "",
           agent: "",
@@ -196,7 +210,10 @@ interface V2PluginContext {
           abort: context.signal,
           metadata: () => {},
           ask: async () => {},
-        });
+        })) as
+          | string
+          | { output?: string; metadata?: Record<string, unknown> };
+
         // V1 ToolResult is `string | { output, metadata?, ... }`;
         // V2 expects `{ content, metadata? }` where content is a string.
         if (typeof result === "string") return { content: result };
