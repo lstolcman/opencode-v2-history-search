@@ -21,6 +21,23 @@ function openDb(): Database {
   return new Database(getDbPath(), { readonly: true });
 }
 
+export function isV2Schema(db?: Database): boolean {
+  const shouldClose = db === undefined;
+  const _db = db ?? openDb();
+  try {
+    const row = _db
+      .query(
+        "SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'",
+      )
+      .get();
+    return !!row;
+  } catch {
+    return false;
+  } finally {
+    if (shouldClose) _db.close();
+  }
+}
+
 export async function* listSessionsSqlite(
   projectID: string | null,
   db?: Database,

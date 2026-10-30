@@ -1,5 +1,6 @@
 import type { Database } from "bun:sqlite";
-import { getDbPath } from "../storage-sqlite";
+import { getDbPath, isV2Schema } from "../storage-sqlite";
+import { traceFileSqliteV2 } from "./file-trace-v2";
 
 export interface FileTraceResult {
   sessionID: string;
@@ -201,7 +202,9 @@ export async function traceFile(
   const dbPath = getDbPath();
   const db = new Database(dbPath, { readonly: true });
   try {
-    return traceFileSqlite(db, projectID, filePath, options);
+    return isV2Schema(db)
+      ? traceFileSqliteV2(db, projectID, filePath, options)
+      : traceFileSqlite(db, projectID, filePath, options);
   } finally {
     db.close();
   }

@@ -150,8 +150,13 @@ export async function searchMultiterm(
   terms: string[],
   options?: { limit?: number },
 ): Promise<MultitermSearchMatch[]> {
+  const { getDbPath, isV2Schema } = await import("../storage-sqlite");
+  if (isV2Schema()) {
+    const { searchMultitermV2 } = await import("./multiterm-v2");
+    return searchMultitermV2(projectID, terms, options);
+  }
+
   const { Database } = await import("bun:sqlite");
-  const { getDbPath } = await import("../storage-sqlite");
   const dbPath = getDbPath();
   const db = new Database(dbPath, { readonly: true });
   try {

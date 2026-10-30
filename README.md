@@ -22,11 +22,11 @@ Search through your OpenCode conversation history across ALL projects or within 
 - **Global Search** - Search across ALL projects on your machine with `searchAllProjects: true`
 - **Project-Aware Results** - See which project directory each result came from
 - **Fast** - Single-term queries ~500ms; multi-term session-level AND ~1s (on 100k+ parts)
-- **SQLite + JSON Support** - Works with OpenCode v1.2+ (SQLite) and v1.1.x (JSON files)
+- **OpenCode V1 + V2 History** - Reads OpenCode V2 (`session_v2` / `session_message`), V1.2+ SQLite (`session` / `part`), and V1.1.x JSON storage
 
 ## Installation
 
-### OpenCode V1 Config (Recommended)
+### OpenCode V1 Config (Legacy)
 
 The config key is singular: `plugin`. Add to your OpenCode config
 (`~/.config/opencode/opencode.json`):
@@ -42,7 +42,7 @@ The config key is singular: `plugin`. Add to your OpenCode config
 
 Then restart OpenCode.
 
-### OpenCode V2 Config
+### OpenCode V2 Config (Recommended)
 
 The config key is plural: `plugins` (to contrast with V1's singular
 `plugin`). The package loads through the plugin `setup` it registers with

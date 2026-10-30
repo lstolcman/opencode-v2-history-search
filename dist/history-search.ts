@@ -22,6 +22,7 @@ __export(exports_storage_sqlite, {
   listSessionsSqlite: () => listSessionsSqlite,
   listPartsSqlite: () => listPartsSqlite,
   listMessagesSqlite: () => listMessagesSqlite,
+  isV2Schema: () => isV2Schema,
   getDbPath: () => getDbPath,
   dbExists: () => dbExists
 });
@@ -41,6 +42,19 @@ function dbExists() {
 }
 function openDb() {
   return new Database(getDbPath(), { readonly: true });
+}
+function isV2Schema(db) {
+  const shouldClose = db === undefined;
+  const _db = db ?? openDb();
+  try {
+    const row = _db.query("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'session_v2'").get();
+    return !!row;
+  } catch {
+    return false;
+  } finally {
+    if (shouldClose)
+      _db.close();
+  }
 }
 async function* listSessionsSqlite(projectID, db) {
   const shouldClose = db === undefined;
@@ -119,6 +133,435 @@ async function* listPartsSqlite(messageID) {
   }
 }
 var init_storage_sqlite = () => {};
+
+// src/storage-sqlite-v2.ts
+import { Database as Database2 } from "bun:sqlite";
+function openDb2() {
+  if (!cachedDb)
+    cachedDb = new Database2(getDbPath(), { readonly: true });
+  return cachedDb;
+}
+function sessionTitle(row) {
+  return row.title || row.slug || "(untitled)";
+}
+function parseJson(value) {
+  try {
+    return JSON.parse(value);
+  } catch {
+    return;
+  }
+}
+function filePathOf(file2) {
+  if (typeof file2 === "string")
+    return file2;
+  if (file2 && typeof file2 === "object") {
+    const value = file2;
+    const candidate = value.path ?? value.filePath ?? value.uri ?? value.name;
+    if (typeof candidate === "string")
+      return candidate;
+  }
+  return;
+}
+function toolOutput(state) {
+  if (!state)
+    return;
+  if (typeof state.output === "string")
+    return state.output;
+  if (Array.isArray(state.content)) {
+    const text = state.content.map((item) => typeof item === "string" ? item : typeof item?.text === "string" ? item.text : "").filter(Boolean).join(`
+`);
+    if (text)
+      return text;
+  }
+  if (state.output != null)
+    return JSON.stringify(state.output);
+  return;
+}
+async function* listSessionsSqliteV2(projectID, db) {
+  const _db = db ?? openDb2();
+  const select = `
+    SELECT
+      s.id,
+      s.project_id,
+      s.title,
+      s.slug,
+      COALESCE(NULLIF(s.directory, ''), p.worktree, '') AS directory,
+      s.time_created,
+      s.time_updated
+    FROM session_v2 s
+    LEFT JOIN project p ON p.id = s.project_id
+  `;
+  const rows = projectID ? _db.query(`${select} WHERE s.project_id = ? ORDER BY s.time_updated DESC`).all(projectID) : _db.query(`${select} ORDER BY s.time_updated DESC`).all();
+  for (const row of rows) {
+    yield {
+      id: row.id,
+      projectID: row.project_id,
+      title: sessionTitle(row),
+      directory: row.directory ?? "",
+      time: { created: row.time_created, updated: row.time_updated }
+    };
+  }
+}
+async function* listMessagesSqliteV2(sessionID, role, db) {
+  const _db = db ?? openDb2();
+  const rows = _db.query(`SELECT id, session_id, type, time_created, data
+       FROM session_message
+       WHERE session_id = ? AND type IN ('user', 'assistant')
+       ORDER BY time_created ASC, seq ASC`).all(sessionID);
+  for (const row of rows) {
+    if (role && row.type !== role)
+      continue;
+    const data = parseJson(row.data);
+    yield {
+      id: row.id,
+      sessionID: row.session_id,
+      role: row.type,
+      agent: data?.agent ?? "",
+      time: { created: data?.time?.created ?? row.time_created }
+    };
+  }
+}
+async function* listPartsSqliteV2(messageID, db) {
+  const _db = db ?? openDb2();
+  const row = _db.query(`SELECT id, session_id, type, data
+       FROM session_message
+       WHERE id = ?`).get(messageID);
+  if (!row)
+    return;
+  const data = parseJson(row.data);
+  if (!data)
+    return;
+  if (row.type === "user") {
+    if (typeof data.text === "string" && data.text.length > 0) {
+      yield {
+        id: `${row.id}:text`,
+        messageID: row.id,
+        sessionID: row.session_id,
+        type: "text",
+        text: data.text
+      };
+    }
+    const files = (data.files ?? []).map(filePathOf).filter((file2) => !!file2);
+    if (files.length > 0) {
+      yield {
+        id: `${row.id}:files`,
+        messageID: row.id,
+        sessionID: row.session_id,
+        type: "patch",
+        files
+      };
+    }
+    return;
+  }
+  const content = Array.isArray(data.content) ? data.content : [];
+  if (content.length === 0 && typeof data.text === "string" && data.text.length > 0) {
+    yield {
+      id: `${row.id}:text`,
+      messageID: row.id,
+      sessionID: row.session_id,
+      type: "text",
+      text: data.text
+    };
+    return;
+  }
+  for (const [index, item] of content.entries()) {
+    const type = item?.type;
+    const id = typeof item.id === "string" ? item.id : `${row.id}:${index}`;
+    if (type === "text" && typeof item.text === "string") {
+      yield {
+        id,
+        messageID: row.id,
+        sessionID: row.session_id,
+        type: "text",
+        text: item.text
+      };
+      continue;
+    }
+    if (type === "tool") {
+      const state = item.state ?? undefined;
+      yield {
+        id,
+        messageID: row.id,
+        sessionID: row.session_id,
+        type: "tool",
+        tool: typeof item.name === "string" ? item.name : "",
+        state: {
+          input: state?.input,
+          output: toolOutput(state),
+          title: typeof state?.title === "string" ? state.title : typeof item.name === "string" ? item.name : undefined
+        }
+      };
+      continue;
+    }
+    if (type === "patch") {
+      const files = Array.isArray(item.files) ? item.files.map(filePathOf).filter((file2) => !!file2) : [];
+      if (files.length > 0) {
+        yield {
+          id,
+          messageID: row.id,
+          sessionID: row.session_id,
+          type: "patch",
+          files
+        };
+      }
+    }
+  }
+}
+var cachedDb;
+var init_storage_sqlite_v2 = __esm(() => {
+  init_storage_sqlite();
+});
+
+// src/storage.ts
+import path2 from "path";
+import os2 from "os";
+import fs from "fs";
+var {Glob } = globalThis.Bun;
+async function getStorageDir() {
+  const xdgData = process.env.XDG_DATA_HOME || path2.join(os2.homedir(), ".local", "share");
+  return path2.join(xdgData, "opencode", "storage");
+}
+async function getCurrentProjectID() {
+  const proc = Bun.spawn(["git", "rev-list", "--max-parents=0", "--all"], {
+    stdout: "pipe",
+    stderr: "pipe"
+  });
+  const output = await new Response(proc.stdout).text();
+  const commits = output.split(`
+`).filter(Boolean).sort();
+  return commits[0] || "global";
+}
+async function* listSessions(projectID) {
+  const storageDir = await getStorageDir();
+  const sessionDir = path2.join(storageDir, "session");
+  if (projectID !== null) {
+    const projectDir = path2.join(sessionDir, projectID);
+    try {
+      for await (const file2 of new Glob("*.json").scan({ cwd: projectDir })) {
+        try {
+          const content = await Bun.file(path2.join(projectDir, file2)).json();
+          yield content;
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      return;
+    }
+    return;
+  }
+  let entries;
+  try {
+    entries = fs.readdirSync(sessionDir);
+  } catch {
+    return;
+  }
+  for (const entry of entries) {
+    const projectDir = path2.join(sessionDir, entry);
+    let stat;
+    try {
+      stat = fs.statSync(projectDir);
+    } catch {
+      continue;
+    }
+    if (!stat.isDirectory())
+      continue;
+    try {
+      for await (const file2 of new Glob("*.json").scan({ cwd: projectDir })) {
+        try {
+          const content = await Bun.file(path2.join(projectDir, file2)).json();
+          yield content;
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      continue;
+    }
+  }
+}
+async function* listMessages(sessionID, role) {
+  const storageDir = await getStorageDir();
+  const messageDir = path2.join(storageDir, "message", sessionID.trim());
+  try {
+    for await (const file2 of new Glob("*.json").scan({ cwd: messageDir })) {
+      try {
+        const content = await Bun.file(path2.join(messageDir, file2)).json();
+        if (role && content.role !== role)
+          continue;
+        yield content;
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return;
+  }
+}
+async function* listParts(messageID) {
+  const storageDir = await getStorageDir();
+  const partDir = path2.join(storageDir, "part", messageID.trim());
+  try {
+    for await (const file2 of new Glob("*.json").scan({ cwd: partDir })) {
+      try {
+        const content = await Bun.file(path2.join(partDir, file2)).json();
+        yield content;
+      } catch {
+        continue;
+      }
+    }
+  } catch {
+    return;
+  }
+}
+var init_storage = () => {};
+
+// src/storage-provider.ts
+function storageKind() {
+  if (!cachedKind) {
+    cachedKind = !dbExists() ? "json" : isV2Schema() ? "v2" : "v1";
+  }
+  return cachedKind;
+}
+async function* listSessions2(projectID) {
+  switch (storageKind()) {
+    case "v2":
+      yield* listSessionsSqliteV2(projectID);
+      return;
+    case "v1":
+      yield* listSessionsSqlite(projectID);
+      return;
+    default:
+      yield* listSessions(projectID);
+  }
+}
+async function* listMessages2(sessionID, role) {
+  switch (storageKind()) {
+    case "v2":
+      yield* listMessagesSqliteV2(sessionID, role);
+      return;
+    case "v1":
+      yield* listMessagesSqlite(sessionID, role);
+      return;
+    default:
+      yield* listMessages(sessionID, role);
+  }
+}
+async function* listParts2(messageID) {
+  switch (storageKind()) {
+    case "v2":
+      yield* listPartsSqliteV2(messageID);
+      return;
+    case "v1":
+      yield* listPartsSqlite(messageID);
+      return;
+    default:
+      yield* listParts(messageID);
+  }
+}
+var cachedKind;
+var init_storage_provider = __esm(() => {
+  init_storage_sqlite();
+  init_storage_sqlite_v2();
+  init_storage();
+});
+
+// src/search/multiterm-v2.ts
+var exports_multiterm_v2 = {};
+__export(exports_multiterm_v2, {
+  searchMultitermV2: () => searchMultitermV2
+});
+function partSearchText(part) {
+  if (part.type === "text")
+    return part.text ?? "";
+  if (part.type === "patch")
+    return (part.files ?? []).join(" ");
+  if (part.type === "tool") {
+    return [
+      part.tool ?? "",
+      part.state?.title ?? "",
+      part.state?.input ? JSON.stringify(part.state.input) : "",
+      part.state?.output ?? ""
+    ].filter(Boolean).join(" ");
+  }
+  return "";
+}
+function excerpt(text, index, length) {
+  const start = Math.max(0, index - 60);
+  const end = Math.min(text.length, index + length + 60);
+  return text.slice(start, end).replace(/\s+/g, " ").trim();
+}
+async function searchMultitermV2(projectID, terms, options, source = defaultSource) {
+  const limit = options?.limit ?? 50;
+  const lowered = terms.map((term) => term.toLowerCase());
+  const results = [];
+  for await (const session of source.listSessions(projectID)) {
+    const termHits = new Map;
+    const title = session.title || "(untitled)";
+    const loweredTitle = title.toLowerCase();
+    for (let i = 0;i < terms.length; i++) {
+      const term = terms[i];
+      if (termHits.has(term))
+        continue;
+      const index = loweredTitle.indexOf(lowered[i]);
+      if (index >= 0) {
+        termHits.set(term, {
+          partID: "title",
+          matchType: "title",
+          excerpt: title
+        });
+      }
+    }
+    if (termHits.size < terms.length) {
+      for await (const message of source.listMessages(session.id)) {
+        for await (const part of source.listParts(message.id)) {
+          const content = partSearchText(part);
+          if (!content)
+            continue;
+          const loweredContent = content.toLowerCase();
+          for (let i = 0;i < terms.length; i++) {
+            const term = terms[i];
+            if (termHits.has(term))
+              continue;
+            const index = loweredContent.indexOf(lowered[i]);
+            if (index >= 0) {
+              termHits.set(term, {
+                partID: part.id,
+                matchType: part.type,
+                excerpt: excerpt(content, index, term.length)
+              });
+            }
+          }
+          if (termHits.size === terms.length)
+            break;
+        }
+        if (termHits.size === terms.length)
+          break;
+      }
+    }
+    if (termHits.size === terms.length) {
+      results.push({
+        sessionID: session.id,
+        sessionTitle: title,
+        timestamp: session.time.updated,
+        projectDirectory: session.directory,
+        termHits
+      });
+      if (results.length >= limit)
+        break;
+    }
+  }
+  return results;
+}
+var defaultSource;
+var init_multiterm_v2 = __esm(() => {
+  init_storage_provider();
+  defaultSource = {
+    listSessions: listSessions2,
+    listMessages: listMessages2,
+    listParts: listParts2
+  };
+});
 
 // node_modules/zod/v4/classic/external.js
 var exports_external = {};
@@ -12440,137 +12883,11 @@ function tool(input) {
   return input;
 }
 tool.schema = exports_external;
-// src/storage-provider.ts
-init_storage_sqlite();
-
-// src/storage.ts
-import path2 from "path";
-import os2 from "os";
-import fs from "fs";
-var {Glob } = globalThis.Bun;
-async function getStorageDir() {
-  const xdgData = process.env.XDG_DATA_HOME || path2.join(os2.homedir(), ".local", "share");
-  return path2.join(xdgData, "opencode", "storage");
-}
-async function getCurrentProjectID() {
-  const proc = Bun.spawn(["git", "rev-list", "--max-parents=0", "--all"], {
-    stdout: "pipe",
-    stderr: "pipe"
-  });
-  const output = await new Response(proc.stdout).text();
-  const commits = output.split(`
-`).filter(Boolean).sort();
-  return commits[0] || "global";
-}
-async function* listSessions(projectID) {
-  const storageDir = await getStorageDir();
-  const sessionDir = path2.join(storageDir, "session");
-  if (projectID !== null) {
-    const projectDir = path2.join(sessionDir, projectID);
-    try {
-      for await (const file2 of new Glob("*.json").scan({ cwd: projectDir })) {
-        try {
-          const content = await Bun.file(path2.join(projectDir, file2)).json();
-          yield content;
-        } catch {
-          continue;
-        }
-      }
-    } catch {
-      return;
-    }
-    return;
-  }
-  let entries;
-  try {
-    entries = fs.readdirSync(sessionDir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    const projectDir = path2.join(sessionDir, entry);
-    let stat;
-    try {
-      stat = fs.statSync(projectDir);
-    } catch {
-      continue;
-    }
-    if (!stat.isDirectory())
-      continue;
-    try {
-      for await (const file2 of new Glob("*.json").scan({ cwd: projectDir })) {
-        try {
-          const content = await Bun.file(path2.join(projectDir, file2)).json();
-          yield content;
-        } catch {
-          continue;
-        }
-      }
-    } catch {
-      continue;
-    }
-  }
-}
-async function* listMessages(sessionID, role) {
-  const storageDir = await getStorageDir();
-  const messageDir = path2.join(storageDir, "message", sessionID.trim());
-  try {
-    for await (const file2 of new Glob("*.json").scan({ cwd: messageDir })) {
-      try {
-        const content = await Bun.file(path2.join(messageDir, file2)).json();
-        if (role && content.role !== role)
-          continue;
-        yield content;
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    return;
-  }
-}
-async function* listParts(messageID) {
-  const storageDir = await getStorageDir();
-  const partDir = path2.join(storageDir, "part", messageID.trim());
-  try {
-    for await (const file2 of new Glob("*.json").scan({ cwd: partDir })) {
-      try {
-        const content = await Bun.file(path2.join(partDir, file2)).json();
-        yield content;
-      } catch {
-        continue;
-      }
-    }
-  } catch {
-    return;
-  }
-}
-
-// src/storage-provider.ts
-var useSqlite = dbExists();
-async function* listSessions2(projectID) {
-  if (useSqlite) {
-    yield* listSessionsSqlite(projectID);
-  } else {
-    yield* listSessions(projectID);
-  }
-}
-async function* listMessages2(sessionID, role) {
-  if (useSqlite) {
-    yield* listMessagesSqlite(sessionID, role);
-  } else {
-    yield* listMessages(sessionID, role);
-  }
-}
-async function* listParts2(messageID) {
-  if (useSqlite) {
-    yield* listPartsSqlite(messageID);
-  } else {
-    yield* listParts(messageID);
-  }
-}
+// src/index.ts
+init_storage_provider();
 
 // src/search/keyword.ts
+init_storage_provider();
 async function searchKeyword(projectID, query, options = {}) {
   const results = [];
   const pattern = options.regex ? new RegExp(query, options.caseSensitive ? "" : "i") : new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), options.caseSensitive ? "" : "i");
@@ -13978,6 +14295,7 @@ Fuse.config = Config;
 }
 
 // src/search/fuzzy.ts
+init_storage_provider();
 async function searchFuzzy(projectID, query, options = {}) {
   const threshold = options.threshold ?? 0.4;
   const limit = options.limit ?? 50;
@@ -14168,6 +14486,143 @@ function filterByDate(results, dateRange) {
 
 // src/search/file-trace.ts
 init_storage_sqlite();
+
+// src/search/file-trace-v2.ts
+function normalizePath(value) {
+  return value.replace(/\\/g, "/");
+}
+function isMatch(path3, query) {
+  if (path3 === query)
+    return true;
+  const isAbsolute = /^[A-Za-z]:\//.test(query) || query.startsWith("/");
+  if (isAbsolute)
+    return false;
+  return path3.endsWith(`/${query}`);
+}
+function traceFileSqliteV2(db, projectID, queryPath, options) {
+  const normalizedQuery = normalizePath(queryPath);
+  const likePattern = `%${normalizedQuery}%`;
+  const projectFilter = projectID !== null ? "AND s.project_id = ?" : "";
+  const sql = `
+    SELECT
+      s.id AS session_id,
+      COALESCE(NULLIF(s.title, ''), s.slug, '(untitled)') AS session_title,
+      sm.id AS message_id,
+      sm.time_created AS message_time,
+      json_extract(je.value, '$.name') AS tool_name,
+      COALESCE(
+        json_extract(je.value, '$.state.input.filePath'),
+        json_extract(je.value, '$.state.input.path')
+      ) AS file_path,
+      json_extract(je.value, '$.files') AS patch_files
+    FROM session_v2 s
+    JOIN session_message sm ON sm.session_id = s.id
+    JOIN json_each(json_extract(sm.data, '$.content')) je
+    WHERE sm.type = 'assistant'
+      AND json_valid(sm.data)
+      AND (
+        (
+          json_extract(je.value, '$.type') = 'tool'
+          AND json_extract(je.value, '$.name') IN ('write', 'edit', 'apply_patch', 'patch')
+          AND REPLACE(
+            COALESCE(
+              json_extract(je.value, '$.state.input.filePath'),
+              json_extract(je.value, '$.state.input.path')
+            ),
+            '\\',
+            '/'
+          ) LIKE ?
+        )
+        OR (
+          json_extract(je.value, '$.type') = 'patch'
+          AND REPLACE(json_extract(je.value, '$.files'), '\\', '/') LIKE ?
+        )
+      )
+      ${projectFilter}
+    ORDER BY message_time DESC
+  `;
+  const binds = projectID !== null ? [likePattern, likePattern, projectID] : [likePattern, likePattern];
+  const rows = db.query(sql).all(...binds);
+  const candidates = [];
+  for (const row of rows) {
+    let matchedPath = null;
+    if (row.file_path) {
+      const normalized = normalizePath(row.file_path);
+      if (isMatch(normalized, normalizedQuery)) {
+        matchedPath = normalized;
+      }
+    }
+    if (!matchedPath && row.patch_files) {
+      try {
+        const parsed = JSON.parse(row.patch_files);
+        if (Array.isArray(parsed)) {
+          for (const file2 of parsed) {
+            if (typeof file2 !== "string")
+              continue;
+            const normalized = normalizePath(file2);
+            if (isMatch(normalized, normalizedQuery)) {
+              matchedPath = normalized;
+              break;
+            }
+          }
+        }
+      } catch {}
+    }
+    if (matchedPath) {
+      candidates.push({
+        sessionID: row.session_id,
+        sessionTitle: row.session_title,
+        messageID: row.message_id,
+        timestamp: row.message_time,
+        toolName: row.tool_name,
+        filePath: matchedPath
+      });
+    }
+  }
+  const seen = new Set;
+  const deduped = [];
+  for (const candidate of candidates) {
+    const key = `${candidate.sessionID}|${candidate.messageID}|${candidate.filePath}`;
+    if (seen.has(key))
+      continue;
+    seen.add(key);
+    deduped.push(candidate);
+  }
+  let earliestTime = Infinity;
+  let earliestIndex = -1;
+  for (let i = 0;i < deduped.length; i++) {
+    const candidate = deduped[i];
+    if (candidate.timestamp < earliestTime) {
+      earliestTime = candidate.timestamp;
+      earliestIndex = i;
+    }
+  }
+  const findUserPrompt = db.query(`
+    SELECT json_extract(data, '$.text') AS text
+    FROM session_message
+    WHERE session_id = ?
+      AND type = 'user'
+      AND time_created < ?
+      AND json_valid(data)
+    ORDER BY time_created DESC
+    LIMIT 1
+  `);
+  const results = deduped.map((candidate, index) => {
+    const promptRow = findUserPrompt.get(candidate.sessionID, candidate.timestamp);
+    return {
+      sessionID: candidate.sessionID,
+      sessionTitle: candidate.sessionTitle,
+      timestamp: candidate.timestamp,
+      firstTouch: index === earliestIndex,
+      userPrompt: promptRow?.text ?? null,
+      toolName: candidate.toolName,
+      filePath: candidate.filePath
+    };
+  });
+  return results.slice(0, options?.limit ?? 50);
+}
+
+// src/search/file-trace.ts
 function traceFileSqlite(db, projectID, queryPath, options) {
   const normalizedQuery = queryPath.replace(/\\/g, "/");
   const isExactPath = normalizedQuery.includes("/");
@@ -14220,7 +14675,7 @@ function traceFileSqlite(db, projectID, queryPath, options) {
   for (const row of rows) {
     let matchedPath = null;
     if (row.source_priority === 0 && row.matched_file_path_tool) {
-      if (isMatch(row.matched_file_path_tool, normalizedQuery, isExactPath)) {
+      if (isMatch2(row.matched_file_path_tool, normalizedQuery, isExactPath)) {
         matchedPath = row.matched_file_path_tool;
       }
     } else if (row.source_priority === 1 && row.matched_files_patch) {
@@ -14228,7 +14683,7 @@ function traceFileSqlite(db, projectID, queryPath, options) {
         const parsed = JSON.parse(row.matched_files_patch);
         if (Array.isArray(parsed.files)) {
           for (const f of parsed.files) {
-            if (isMatch(f, normalizedQuery, isExactPath)) {
+            if (isMatch2(f, normalizedQuery, isExactPath)) {
               matchedPath = f;
               break;
             }
@@ -14294,18 +14749,18 @@ function traceFileSqlite(db, projectID, queryPath, options) {
   const limit = options?.limit ?? 50;
   return results.slice(0, limit);
 }
-function isMatch(path3, query, isExact) {
+function isMatch2(path3, query, isExact) {
   if (isExact) {
     return path3 === query;
   }
   return path3 === query || path3.endsWith(`/${query}`);
 }
 async function traceFile(projectID, filePath, options) {
-  const { Database: Database2 } = await import("bun:sqlite");
+  const { Database: Database3 } = await import("bun:sqlite");
   const dbPath = getDbPath();
-  const db = new Database2(dbPath, { readonly: true });
+  const db = new Database3(dbPath, { readonly: true });
   try {
-    return traceFileSqlite(db, projectID, filePath, options);
+    return isV2Schema(db) ? traceFileSqliteV2(db, projectID, filePath, options) : traceFileSqlite(db, projectID, filePath, options);
   } finally {
     db.close();
   }
@@ -14402,10 +14857,14 @@ function searchMultitermSqlite(db, projectID, terms, options) {
   }));
 }
 async function searchMultiterm(projectID, terms, options) {
-  const { Database: Database2 } = await import("bun:sqlite");
-  const { getDbPath: getDbPath2 } = await Promise.resolve().then(() => (init_storage_sqlite(), exports_storage_sqlite));
+  const { getDbPath: getDbPath2, isV2Schema: isV2Schema2 } = await Promise.resolve().then(() => (init_storage_sqlite(), exports_storage_sqlite));
+  if (isV2Schema2()) {
+    const { searchMultitermV2: searchMultitermV22 } = await Promise.resolve().then(() => (init_multiterm_v2(), exports_multiterm_v2));
+    return searchMultitermV22(projectID, terms, options);
+  }
+  const { Database: Database3 } = await import("bun:sqlite");
   const dbPath = getDbPath2();
-  const db = new Database2(dbPath, { readonly: true });
+  const db = new Database3(dbPath, { readonly: true });
   try {
     return searchMultitermSqlite(db, projectID, terms, options);
   } finally {
@@ -14517,7 +14976,7 @@ Supports keyword search, regex patterns, fuzzy search, multi-term AND search, da
     limit: tool.schema.number().optional().describe("Maximum number of results (default: 50)"),
     role: tool.schema.enum(["user", "assistant"]).optional().describe("Filter by message role: 'user' for your messages only, 'assistant' for AI responses only. Ignored if filePath is provided.")
   },
-  async execute(args) {
+  async execute(args, context) {
     if (!args.query && !args.filePath && !args.terms) {
       throw new Error("Either 'query', 'terms', or 'filePath' must be provided.");
     }
@@ -14528,7 +14987,7 @@ Supports keyword search, regex patterns, fuzzy search, multi-term AND search, da
       if (args.terms.length === 1) {
         args.query = args.terms[0];
       } else {
-        const projectID2 = args.searchAllProjects ? null : await getCurrentProjectID();
+        const projectID2 = args.searchAllProjects ? null : context?.projectID ?? await getCurrentProjectID();
         let matches2 = await searchMultiterm(projectID2, args.terms, {
           limit: args.limit
         });
@@ -14539,7 +14998,7 @@ Supports keyword search, regex patterns, fuzzy search, multi-term AND search, da
         return formatMultitermResults(matches2);
       }
     }
-    const projectID = args.searchAllProjects ? null : await getCurrentProjectID();
+    const projectID = args.searchAllProjects ? null : context?.projectID ?? await getCurrentProjectID();
     if (args.filePath) {
       let matches2 = await traceFile(projectID, args.filePath, {
         limit: args.limit
@@ -14584,6 +15043,7 @@ historySearch.setup = async (ctx) => {
       input: tool.schema.object(historySearch.args),
       execute: async (input, context) => {
         const result = await historySearch.execute(input, {
+          projectID: ctx.location?.project?.id,
           sessionID: "",
           messageID: "",
           agent: "",
