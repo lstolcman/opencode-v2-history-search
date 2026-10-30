@@ -5,7 +5,10 @@ const result = await Bun.build({
   format: "esm",
   minify: false,
   splitting: false,
-  external: ["@opencode-ai/plugin", "bun"],
+  // Keep the plugin self-contained so it also loads from a local/Git plugin
+  // directory, where OpenCode resolves bare imports from the config root
+  // rather than the plugin's own node_modules.
+  external: ["bun"],
   naming: {
     entry: "history-search.ts",
   },
